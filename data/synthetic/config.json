@@ -1,0 +1,21 @@
+{
+  "n_tickers": 1000,
+  "n_days": 250,
+  "overnight_sigma": 0.0085,
+  "gap_threshold": 0.03,
+  "continuation_prob": 0.08,
+  "continuation_mean": 0.015,
+  "continuation_sigma": 0.02,
+  "normal_intraday_sigma": 0.01,
+  "fm_noise": [
+    0.01,
+    0.015,
+    0.012
+  ],
+  "fm_bias": [
+    0.0,
+    0.002,
+    -0.001
+  ],
+  "seed": 0
+}
