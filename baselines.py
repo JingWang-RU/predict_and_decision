@@ -1,6 +1,4 @@
 """
-Baselines promised in the UAI-2026 rebuttal for Submission 232.
-
 Each strategy implements a single method:
     decide(preds_list, history) -> weights over [CASH, *universe]
 
