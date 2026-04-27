@@ -15,6 +15,8 @@ UniversalPortfolio   : Cover (1991) — approximate via a grid of fixed mixtures
 CORN                 : correlation-pattern matching on recent returns
 BestSingleFMOracle   : in-hindsight best of the three foundation models
 StandardOMD          : our OMD with lambda_tp = 0 (no turnover penalty)
+LightGBMRanker       : LightGBM regressor on FM preds, refit on rolling buffer
+EconReversal         : short-horizon contrarian (Lehmann 1990 / Jegadeesh 1990)
 
 These consume the same preds_list = [df1, df2, df3] with columns
 [ticker, y_pred, y_true] the paper's trader uses.
@@ -209,6 +211,129 @@ class CORN(BaseStrategy):
 
     def observe(self, r_full_active):
         self.recent_returns.append(np.asarray(r_full_active))
+
+
+class LightGBMRanker(BaseStrategy):
+    """
+    LightGBM regressor trained online on a rolling buffer of
+        X = [y_pred_1, y_pred_2, y_pred_3]   (per-stock per-day FM predictions)
+        y = realized log return on that gap day
+    At decision time we score today's A_t and equal-weight the top-k.
+    Refits every `refit_every` days once `min_train` samples are available.
+    """
+    name = "LightGBM"
+
+    def __init__(self, universe, top_k: int = 20,
+                 min_train: int = 500, refit_every: int = 20,
+                 buffer_cap: int = 50_000, params: dict | None = None):
+        super().__init__(universe)
+        self.top_k = top_k
+        self.min_train = min_train
+        self.refit_every = refit_every
+        self.buffer_cap = buffer_cap
+        self.params = params or {
+            "objective": "regression",
+            "learning_rate": 0.05,
+            "num_leaves": 31,
+            "min_data_in_leaf": 20,
+            "verbose": -1,
+        }
+        self.X_buf: list[np.ndarray] = []
+        self.y_buf: list[float] = []
+        self.model = None
+        self._since_refit = 0
+        self._last_X = None
+
+    def _maybe_refit(self):
+        if len(self.y_buf) < self.min_train:
+            return
+        if self.model is not None and self._since_refit < self.refit_every:
+            return
+        try:
+            import lightgbm as lgb
+        except ImportError:
+            return
+        X = np.vstack(self.X_buf)
+        y = np.asarray(self.y_buf)
+        dset = lgb.Dataset(X, label=y)
+        self.model = lgb.train(self.params, dset, num_boost_round=200)
+        self._since_refit = 0
+
+    def decide(self, preds_list, **_):
+        tickers_At, r_hat, _ = _merge_preds(preds_list)
+        idx = self._active_indices(tickers_At)
+        if not idx:
+            w = np.zeros(self.u_size + 1); w[0] = 1.0
+            self._last_X, self._last_idx = None, idx
+            return w
+
+        l_hat = np.log1p(r_hat)  # back to log-return scale used as features
+        self._last_X = l_hat
+        self._last_idx = idx
+
+        if self.model is None:
+            score = r_hat.mean(axis=1)
+        else:
+            score = self.model.predict(l_hat)
+        top = np.argsort(-score)[: min(self.top_k, len(idx))]
+        w_active = np.zeros(len(idx))
+        w_active[top] = 1.0 / len(top)
+        return _pad(w_active, 0.0, self.u_size, idx)
+
+    def observe(self, r_full_active):
+        """Runner passes the universe-sized realized-return vector (cash stripped)."""
+        if self._last_X is None or not self._last_idx:
+            return
+        r = np.asarray(r_full_active)
+        y = r[np.array(self._last_idx)]
+        for row, target in zip(self._last_X, y):
+            self.X_buf.append(row[None, :])
+            self.y_buf.append(float(target))
+        if len(self.y_buf) > self.buffer_cap:
+            drop = len(self.y_buf) - self.buffer_cap
+            self.X_buf = self.X_buf[drop:]
+            self.y_buf = self.y_buf[drop:]
+        self._since_refit += 1
+        self._maybe_refit()
+
+
+class EconReversal(BaseStrategy):
+    """
+    Econometric short-horizon reversal (Lehmann 1990; Jegadeesh 1990;
+    Jegadeesh & Titman 1995). Long the losers of the prior k-day window
+    in the current event universe A_t, equal-weighted; cash if A_t empty.
+
+    The classic dollar-neutral long/short isn't expressible in this
+    long-only simplex framework, so we use the long-leg-only variant
+    used in event-study replications (e.g., Da, Liu & Schaumburg 2014).
+    """
+    name = "EconReversal"
+
+    def __init__(self, universe, lookback: int = 1, bottom_frac: float = 0.2,
+                 past_returns_fn=None):
+        super().__init__(universe)
+        self.lookback = lookback
+        self.bottom_frac = bottom_frac
+        # callable(tickers, k) -> array of k-day cumulative log returns
+        self.past_returns_fn = past_returns_fn
+
+    def decide(self, preds_list, **_):
+        tickers_At, _, _ = _merge_preds(preds_list)
+        idx = self._active_indices(tickers_At)
+        if not idx:
+            w = np.zeros(self.u_size + 1); w[0] = 1.0
+            return w
+        if self.past_returns_fn is None:
+            # No past-return source available: fall back to equal weight on A_t.
+            return _pad(np.full(len(idx), 1.0 / len(idx)), 0.0, self.u_size, idx)
+        past = np.asarray(self.past_returns_fn(tickers_At, self.lookback))
+        # Pick the worst-performing fraction (the "losers").
+        n_pick = max(1, int(np.ceil(self.bottom_frac * len(idx))))
+        order = np.argsort(past)  # ascending: most negative first
+        losers = order[:n_pick]
+        w_active = np.zeros(len(idx))
+        w_active[losers] = 1.0 / n_pick
+        return _pad(w_active, 0.0, self.u_size, idx)
 
 
 class BestSingleFMOracle(BaseStrategy):

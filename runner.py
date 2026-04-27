@@ -20,6 +20,7 @@ from synthetic_data import SyntheticConfig, generate, day_prediction_frames, emp
 from baselines import (
     EqualWeightGap, MeanReversion, StandardOMD,
     UniversalPortfolio, CORN, BestSingleFMOracle,
+    LightGBMRanker, EconReversal,
 )
 from memory_aware_trader import MemoryAwareTrader
 
@@ -130,6 +131,24 @@ def main():
             self._t += 1
             return w
 
+    # Rolling realized-return history for EconReversal (per ticker).
+    t_to_i = {tk: i for i, tk in enumerate(universe)}
+    realized_hist: list[np.ndarray] = []  # appended each day inside run_one wrappers
+
+    def past_returns_fn(tickers, k):
+        if not realized_hist:
+            return np.zeros(len(tickers))
+        arr = np.array(realized_hist[-k:])  # (<=k, u_size)
+        cum = arr.sum(axis=0)
+        return np.array([cum[t_to_i[t]] if t in t_to_i else 0.0 for t in tickers])
+
+    class _EconRev(EconReversal):
+        def __init__(self, universe_):
+            super().__init__(universe_, lookback=1, bottom_frac=0.2,
+                             past_returns_fn=past_returns_fn)
+        def observe(self, r_full_active):
+            realized_hist.append(np.asarray(r_full_active))
+
     strategies = [
         EqualWeightGap(universe),
         _MR(universe),
@@ -137,6 +156,8 @@ def main():
         UniversalPortfolio(universe),
         CORN(universe),
         BestSingleFMOracle(universe, top_k=20, chosen_model=0),
+        LightGBMRanker(universe, top_k=20),
+        _EconRev(universe),
         MemoryAwareTrader(universe, eta=0.01, lambda_tp=0.001, beta=1.0),
     ]
 

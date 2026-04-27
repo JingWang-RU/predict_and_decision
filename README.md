@@ -78,6 +78,7 @@ specific flags; see `--help`) for sensitivity checks.
 | [`runner.py`](runner.py) | Full daily back-test, Sharpe / MDD / Turnover / Wealth |
 | [`ablation_threshold.py`](ablation_threshold.py) | τ ∈ {0.01, 0.02, 0.03, 0.05, 0.10} ablation |
 | [`ablation_static_encoder.py`](ablation_static_encoder.py) | Hashing vs. dense-embedding × d ∈ {16, 32, 64, 128} |
+| [`ablation_monthly_frequency.py`](ablation_monthly_frequency.py) | Monthly-frequency robustness check (daily vs. monthly; Reviewer M4wU) |
 | [`regret_verification.py`](regret_verification.py) | Empirical O(√T) policy-regret check |
 | [`configs/default.yaml`](configs/default.yaml) | Canonical hyperparameters |
 
